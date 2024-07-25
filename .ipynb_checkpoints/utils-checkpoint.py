@@ -10,8 +10,8 @@ from matplotlib import pyplot as plt
 import boto3
 
 
-def open_ncs(folder):
-    ff = sorted(glob(folder + '/*.nc'))
+def open_ncs(folder, pattern):
+    ff = sorted(glob(f'{folder}/{pattern}*.nc'))
 
     df = xr.open_dataset(ff[0])
     print(df.dims)
