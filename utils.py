@@ -13,7 +13,7 @@ import boto3
 def open_ncs(folder, pattern):
     ff = sorted(glob(f'{folder}/{pattern}*.nc'))
 
-    df = xr.open_dataset(ff[0])
+    df = xr.open_dataset(ff[0], chunks=dict(time=-1))
     print(df.dims)
     df = df.rio.write_crs('epsg:4326', inplace=True)
     df = df.rename({"longitude": "x", "latitude": "y"})
