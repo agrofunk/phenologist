@@ -1,0 +1,6 @@
+nbs/
+images/
+fromqgis/
+.ipynb_checkpoings/
+.idea/
+__pycache__/

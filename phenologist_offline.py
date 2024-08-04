@@ -22,7 +22,7 @@ from pprint import pprint
 warnings.filterwarnings("ignore")
 from pathlib import Path
 from glob import glob
-
+from utils import open_ncs, treat_save, calculate_indices
 
 import pylab as plt
 
@@ -31,6 +31,7 @@ import pylab as plt
 farmgroupid = 'fd9239de-65ae-4d0f-a1cf-9c0fd5ac9131'
 vi = 'LAI'
 source = f'{vi}_mgap_90_w_7_v2.nc'
+mission = 'Landsat'
 
 suffix = 'safrinha'
 years = 0 # all years = 0 or chose year as list of int
@@ -50,13 +51,35 @@ method_eos = "last"
 
 remove_temp = True
 
-# %% Load data and prepare output folder
+# %% IF not yet, calculate de VI
+
+foldernc = f'/mnt/geodata/Clientes/0FARMS/{farmgroupid}/'
+#folderout = f'{foldernc}/results/'
+#Path(folderout).mkdir( parents = True, exist_ok = True)
+
+# if the VI file does not exist, we have to calculate it. 
+if not os.path.isfile(f'{foldernc}/results/{source}'):
+
+    ds = open_ncs(foldernc, mission)
+    ds1 = ds.resample(time='W').max(skipna=True)
+    print(ds.dims)
+    del ds
+    print(ds1.dims)
+    print(f'\n ! source files for {vi} loaded \n')
+
+    # calculate VI
+    vis = calculate_indices( ds1 , index = [vi], drop = True, collection = mission)
+    #vis['kNDVI'] = xr.where(vis['kNDVI'] > 0.4, np.nan, vis['kNDVI'])
+    # vis['NDVI'] = xr.where((vis['NDVI'] > 0.74) | (vis['NDVI'] < -0.05), np.nan, vis['NDVI'])
+    vis[vi] = xr.where((vis[vi] > 7.4) | (vis[vi] < 0), np.nan, vis[vi])
+
+    vis_f1 = treat_save(vis = vis, vi = vi, days = 90, window = 7, folderout = f'{foldernc}/results/', save = True)
+
+else:
 # Open VI file
-file = f'/mnt/geodata/Clientes/0FARMS/{farmgroupid}/results/{source}'
-print(f'source file for {vi} is {file}')
-df = xr.open_dataset(file)
-folderout = f'/mnt/geodata/Clientes/0FARMS/{farmgroupid}/results/Phenology/'
-Path(f'{folderout}').mkdir( parents = True, exist_ok = True)
+    file = f'{foldernc}/results/{source}'
+    print(f'source file for {vi} is {file} \n opening it ...')
+    vis_f1 = xr.open_dataset(file)
 
 # %% some checks
 nextyear = 0
@@ -64,17 +87,17 @@ if years == 0:
     print('o-o check yeaars \n')
     if int(end[:2]) > int(start[:2]):
         print('o-o end > start: season start and finish in the same year \n    typically safrinha or northern hemisphere')#and int(end[:2]) < int(str(df.time.values[-1]).split('T')[0][5:7]):
-        if int(end[:2]) > int(str(df.time.values[-1]).split('T')[0][5:7]):
+        if int(end[:2]) > int(str(vis_f1.time.values[-1]).split('T')[0][5:7]):
             print('!!! not enough data for the last year \n   end > data.end')
-            years = np.unique(df.time.dt.year)[:-1]
+            years = np.unique(vis_f1.time.dt.year)[:-1]
         else:
             print('! you are good to go')
-            years = np.unique(df.time.dt.year)
+            years = np.unique(vis_f1.time.dt.year)
             print('> selected years:', years)
     else: 
         print('o-o you are looking at the tropics and southern hemisphere, \n    since your season go to the next year (+1)')
         nextyear = 1
-        years = np.unique(df.time.dt.year)[:-1]
+        years = np.unique(vis_f1.time.dt.year)[:-1]
         print('> selected years:', years, ' (+1)')
 else:
     print('o-o your customized choice')
@@ -89,7 +112,7 @@ else:
 # %% run phenology calculation
 dates = []
 for year in years:
-    da = df['LAI'].sel(time=slice(f'{year}-{start}',f'{year+nextyear}-{end}'))
+    da = vis_f1[vi].sel(time=slice(f'{year}-{start}',f'{year+nextyear}-{end}'))
     da = da.compute()
     metrics = xr_phenology( da, method_sos=method_sos, method_eos=method_eos, stats=basic_pheno_stats,
                     verbose=False )
@@ -99,21 +122,21 @@ for year in years:
     dates.append(date)
     metrics = metrics.expand_dims(dim='time')
     # save temoporary files
-    metrics.to_netcdf(f'{folderout}/phenology_{year}_{suffix}.nc')
+    metrics.to_netcdf(f'{foldernc}/results/phenology_{year}_{suffix}.nc')
     del da, metrics
 
 
-files = sorted(glob(f'{folderout}/phenology*{suffix}.nc'))
+files = sorted(glob(f'{foldernc}/results/phenology_*_{suffix}.nc'))
 pprint(files)
 
 DF = xr.open_mfdataset(files, concat_dim='time', combine='nested')
 DF = DF.assign_coords({'time':dates})
 datei, datef = str(DF.time.values[0])[:4] , str(DF.time.values[-1])[:4]
-DF.to_netcdf(f'{folderout}/Phenology_{datei}-{datef}_{suffix}.nc')
+DF.to_netcdf(f'{foldernc}/results/Phenology_{datei}-{datef}_{suffix}.nc')
 if remove_temp == True:
-    os.system(f'rm {folderout}/phe*')
+    os.system(f'rm {foldernc}/results/phe*')
     print('!! temporary phenology* files removed')
-print(f'o-o ! saved >> {folderout}/Phenology_{datei}-{datef}_{suffix}.nc')
+print(f'o-o ! saved >> {foldernc}/results/Phenology_{datei}-{datef}_{suffix}.nc')
 t_end = timer()
 print('\n total execution time: \n ',t_end - t_start, ' seconds')
 

@@ -1,16 +1,156 @@
 from glob import glob
 import xarray as xr
 import rasterio as rio
-import warnings
+import warnings, os
 import numpy as np
 import matplotlib
+from pathlib import Path
 
-matplotlib.use('Agg')
+#matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import boto3
 
 
+def phenology_png_s3(var, 
+                     dates : list ,
+                       farmgroupid : str , 
+                       bucketname : str ,
+                       vi: str ,
+                       mission : str ,
+                       metric_type : str ,
+                       metric_type2 : str ,
+                       bottom : int ,
+                       top : int ,
+                       version : str ,
+                       desc : str ,
+                       run : str ,
+                       local_folder : str ,
+                       remove_local = True,
+                       up : bool = True, 
+                       ):
+
+    import os
+    from pathlib import Path
+    import numpy as np
+    import boto3
+    from botocore.exceptions import ClientError
+    import logging
+    from uuid import uuid4
+    import rasterio as rio
+    
+    mapimages = {"L": []}
+    today = str(np.datetime64('today'))
+    folder = f'{local_folder}/{today}/{metric_type}/{metric_type2}/'
+    s3folder = f'{farmgroupid}/{today}/{metric_type}/{metric_type2}/'
+    Path(folder).mkdir( parents = True, exist_ok = True)
+
+    # upload functions
+    def upload_file(filename, bucketname, objectname):
+        s3_client = boto3.client('s3')
+        try:
+            response = s3_client.upload_file(filename,  bucketname,  objectname, ExtraArgs = themeta)              
+        except ClientError as e:
+            logging.error(e)
+            return False
+        return True  
+    
+    def add_s3path_to_mapimages(mapImages, path): 
+      mapImages['L'].append({"M": {'path': {'S': path}}})
+
+    # NOW WE RUN THE WHOLE THING
+    for metric in list(var):
+    # get cmap
+        if metric in ['vPOS','vSOS','vEOS','AOS','Trough']: cmap = 'RdYlGn'
+        if metric in ['SOS','POS','EOS','LOS']: cmap = 'bwr'
+        if metric in ['ROG', 'ROS']: cmap = 'RdYlBu'
+
+        for i,date in enumerate(dates):
+            fn = f'{date}_{metric}'
+            var[metric].sel(time=date).rio.to_raster( f'{local_folder}/{fn}.tif', dtype='uint16')
+            os.system(f'gdal_translate -of PNG -ot UInt16 -scale {bottom} {top} 0 65535 {local_folder}/{fn}.tif {local_folder}/{fn}.png')
+            png2color( path = f'{local_folder}/{fn}.png', cmap = cmap, vmin = 0, vmax = 65535)
+
+            # use the first metric of the fist date to get metadata    
+            if i == 0 and metric == list(var)[0]:
+                os.system(f'gdalinfo {local_folder}/{fn}.tif > {local_folder}/{fn}.txt')
+                m_center, m_ur, m_ll = metadata_gdal_parser(f'{local_folder}/{fn}.txt')
+                print(m_center, m_ur, m_ll)
+            
+            # remove temporary tif and xmls
+            os.system(f'rm {local_folder}/{fn}.tif')
+            os.system(f'rm {local_folder}/{fn}.png.aux.xml')
+
+            themeta = {"Metadata": {
+                    "variable": metric,
+                    "source" : mission,
+                    "metric_type" : metric_type,
+                    "metric_type2" : metric_type2,
+                    "date" : str(date),
+                    "farmgroupid" : farmgroupid,
+                    "center_x" : m_center[0],
+                    "center_y" : m_center[1],
+                    "right" : m_ur[0],
+                    "upper" : m_ur[1],
+                    "left" :  m_ll[0],
+                    "lower" : m_ll[1],
+                    "version" : version,
+                    "desc" : desc,
+                    "run" : today
+                }}
+            
+            # UPLOAD to S3 
+            layername = f'{mission} {vi} {metric_type} {metric_type2}'
+            filename = f'{local_folder}/{fn}.png'
+            objectname = f'{s3folder}{fn}.png'
+
+            if up:
+                upload_file(filename, 
+                            bucketname, 
+                            objectname)
+                add_s3path_to_mapimages(mapimages, 
+                                        objectname)
+    # remove stuff
+    if remove_local == True:
+        os.system(f'rm -rf {folder}')
+        print(f'<<< <<< {folder} removed')
+    
+    return {
+            "M": {
+                "layerName": {
+                "S": layername #This should contain all the information needed to describe this set of images
+                },
+                "date": {
+                "S": f'{str(dates[0])}_{dates[-1]}' #the date range represented in this set of images
+                },
+                "mapImages": mapimages} }
+
+
+
+
+
+
+
+def treat_save(vis, vi, days, window, folderout, save = True):
+
+    vis[vi] = vis[vi].chunk(dict(time=-1)) #dict(time=-1)
+    vis_f1 = vis[vi].interpolate_na( dim = 'time' , 
+                                method =  'pchip', # pchip , spline
+                                max_gap = np.timedelta64( days , 'D' )
+                                ).rolling(time=window).mean(skipna=True)
+    
+    if save == True:
+        Path(f'{folderout}').mkdir( parents = True, exist_ok = True)
+
+        try:
+            vis_f1.to_netcdf(f'{folderout}/{vi}_mgap_{days}_w_{window}_v2.nc')
+        except:
+            os.system(f'rm {folderout}/{vi}_mgap_{days}_w_{window}_v2.nc')
+            vis_f1.to_netcdf(f'{folderout}/{vi}_mgap_{days}_w_{window}_v2.nc')
+    return vis_f1
+
+
 def open_ncs(folder, pattern):
+    
     ff = sorted(glob(f'{folder}/{pattern}*.nc'))
 
     df = xr.open_dataset(ff[0], chunks=dict(time=-1))
@@ -33,9 +173,6 @@ def clidev(ds,
            plot=True,
            pcs=(1, 99)  # just for plotting
            ):
-    ''' 
-        return zscore, anomalies, mean, stdev
-    '''
 
     me = ds.groupby(ds.time.dt.month).mean()
     sd = ds.groupby(ds.time.dt.month).std().clip(min=0.001)
